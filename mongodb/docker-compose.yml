@@ -1,0 +1,28 @@
+services:
+  configsvr:
+    image: mongo:7
+    command: mongod --configsvr --replSet configReplSet --port 27019
+    ports:
+      - "27019:27019"
+
+  shard1:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard1ReplSet --port 27018
+    ports:
+      - "27018:27018"
+
+  shard2:
+    image: mongo:7
+    command: mongod --shardsvr --replSet shard2ReplSet --port 27020
+    ports:
+      - "27020:27020"
+
+  mongos:
+    image: mongo:7
+    command: mongos --configdb configReplSet/configsvr:27019 --bind_ip_all --port 27017
+    ports:
+      - "27017:27017"
+    depends_on:
+      - configsvr
+      - shard1
+      - shard2
