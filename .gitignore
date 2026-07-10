@@ -1,0 +1,10 @@
+# Ignorar carpeta de datos descomprimida (23,000+ archivos)
+data/Argentina/
+
+# Ignorar archivos auxiliares del clúster Citus (solo entregar lo requerido)
+citus/extract_data.py
+citus/generate_notebook.py
+citus/init_db.sql
+citus/load_citus.py
+citus/queries_citus.sql
+citus/run_queries.py
