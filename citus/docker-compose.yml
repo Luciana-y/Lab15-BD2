@@ -1,0 +1,59 @@
+version: '3.8'
+
+services:
+  coordinator:
+    image: citusdata/citus:12.1
+    container_name: citus_coordinator
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: news_analysis_pg
+      PGUSER: postgres
+      PGPASSWORD: password
+    volumes:
+      - coordinator_data:/var/lib/postgresql/data
+    networks:
+      - citus_net
+
+  worker1:
+    image: citusdata/citus:12.1
+    container_name: citus_worker1
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: news_analysis_pg
+      PGUSER: postgres
+      PGPASSWORD: password
+    depends_on:
+      - coordinator
+    volumes:
+      - worker1_data:/var/lib/postgresql/data
+    networks:
+      - citus_net
+
+  worker2:
+    image: citusdata/citus:12.1
+    container_name: citus_worker2
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: news_analysis_pg
+      PGUSER: postgres
+      PGPASSWORD: password
+    depends_on:
+      - coordinator
+    volumes:
+      - worker2_data:/var/lib/postgresql/data
+    networks:
+      - citus_net
+
+volumes:
+  coordinator_data:
+  worker1_data:
+  worker2_data:
+
+networks:
+  citus_net:
+    driver: bridge
