@@ -1,11 +1,3 @@
-"""
-Parte III - Grafico comparativo de tiempos Q1-Q5: MongoDB vs Citus.
-Genera comparacion_q1q5.png (barras agrupadas, escala log por el peso de Q2).
-
-Tiempos (best de 5, en ms):
-  MongoDB -> de mongodb/tiempos_mongodb.csv
-  Citus   -> de la Tabla 1 del informe (latencias registradas en el cluster Citus)
-"""
 import matplotlib.pyplot as plt
 import numpy as np
 
