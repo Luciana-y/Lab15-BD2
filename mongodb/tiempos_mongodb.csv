@@ -1,0 +1,6 @@
+query,tipo,rows,best_ms,avg_ms
+Q1,Textual (relevancia),20,5.29,5.44
+Q2,Textual con exclusion,20,336.63,352.39
+Q3,Ordenamiento,10,3.03,3.37
+Q4,Agregacion (shard key),75,36.18,37.08
+Q5,Agregacion (no shard key),12,35.33,36.14

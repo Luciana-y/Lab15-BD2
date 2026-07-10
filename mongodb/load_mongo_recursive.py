@@ -1,181 +1,173 @@
+import io
+import json
+import zipfile
 from pathlib import Path
+
 import pandas as pd
 from pymongo import MongoClient
 
-# Ruta base donde está la carpeta Argentina
-BASE_DIR = Path("data/Argentina")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+ZIP_PATH = REPO_ROOT / "data" / "Argentina.zip"
+DIR_PATH = REPO_ROOT / "data" / "Argentina"
 
-# Conexión al router mongos
-MONGO_URI = "mongodb://localhost:27017"
+MONGO_URI = "mongodb://localhost:28017"
 DB_NAME = "news_analysis"
 COLLECTION_NAME = "milei_news"
 
-
-def normalize_column_name(col: str) -> str:
-    """
-    Normaliza nombres de columnas por si vienen con mayúsculas,
-    espacios o formatos diferentes.
-    """
-    return (
-        col.strip()
-        .lower()
-        .replace(" ", "_")
-        .replace("-", "_")
-    )
+EXPECTED_COLUMNS = [
+    "news_paper",
+    "section",
+    "title",
+    "summary",
+    "published",
+    "link",
+    "tags",
+]
 
 
-def clean_dataframe(df: pd.DataFrame, news_paper: str, section: str) -> pd.DataFrame:
-    """
-    Limpia y estandariza el DataFrame para que todos los CSV
-    tengan el mismo formato antes de insertarse en MongoDB.
-    """
+def decode_bytes(raw: bytes) -> str:
+    for enc in ("utf-8", "cp1252", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("latin-1")
 
-    # Normalizar nombres de columnas
-    df.columns = [normalize_column_name(c) for c in df.columns]
 
-    # Agregar periódico y sección desde la ruta de carpetas
-    df["news_paper"] = news_paper
-    df["section"] = section
+def parse_concatenated_json(text: str) -> list:
+    decoder = json.JSONDecoder()
+    idx = 0
+    n = len(text)
+    objects = []
+    while idx < n:
+        while idx < n and text[idx] in " \r\n\t":
+            idx += 1
+        if idx >= n:
+            break
+        obj, end = decoder.raw_decode(text, idx)
+        if isinstance(obj, list):
+            objects.extend(obj)
+        else:
+            objects.append(obj)
+        idx = end
+    return objects
 
-    # Crear columnas esperadas si no existen
-    expected_columns = [
-        "news_paper",
-        "section",
-        "title",
-        "summary",
-        "published",
-        "link",
-        "tags"
-    ]
 
-    for col in expected_columns:
-        if col not in df.columns:
-            df[col] = None
+def iter_json_sources():
+    if ZIP_PATH.exists():
+        with zipfile.ZipFile(ZIP_PATH) as zf:
+            for name in zf.namelist():
+                if name.endswith(".json"):
+                    yield name, zf.read(name)
+    elif DIR_PATH.exists():
+        for path in DIR_PATH.rglob("*.json"):
+            yield str(path.relative_to(DIR_PATH)), path.read_bytes()
+    else:
+        raise FileNotFoundError(
+            f"No se encontro ni {ZIP_PATH} ni {DIR_PATH}. "
+            "Coloca el dataset en data/ antes de ejecutar."
+        )
 
-    # Limpieza básica
-    df["news_paper"] = df["news_paper"].fillna("unknown").astype(str).str.strip()
-    df["section"] = df["section"].fillna("unknown").astype(str).str.lower().str.strip()
+
+def read_all_records() -> pd.DataFrame:
+    rows = []
+    files_ok = files_err = 0
+
+    for name, raw in iter_json_sources():
+        try:
+            text = decode_bytes(raw)
+            objects = parse_concatenated_json(text)
+        except Exception as e:
+            files_err += 1
+            continue
+
+        parts = Path(name).parts
+        path_paper = parts[0] if len(parts) >= 1 else None
+        path_section = parts[1] if len(parts) >= 2 else None
+
+        for obj in objects:
+            if not isinstance(obj, dict):
+                continue
+            rows.append({
+                "news_paper": obj.get("news_paper") or path_paper,
+                "section": obj.get("section") or path_section,
+                "title": obj.get("title"),
+                "summary": obj.get("summary"),
+                "published": obj.get("published"),
+                "link": obj.get("link"),
+                "tags": obj.get("tags"),
+            })
+        files_ok += 1
+
+    print(f"Archivos leidos: {files_ok} (con error: {files_err})")
+    print(f"Registros crudos (antes de limpiar): {len(rows)}")
+    return pd.DataFrame(rows, columns=EXPECTED_COLUMNS)
+
+
+def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    #normalizacion de texto
+    df["news_paper"] = df["news_paper"].fillna("unknown").astype(str).str.strip().str.lower()
+    #section: el campo clave del sharding, quitar espacios y pasar a minuscula
+    df["section"] = df["section"].fillna("unknown").astype(str).str.strip().str.lower()
+    df.loc[df["section"] == "", "section"] = "unknown"
 
     df["title"] = df["title"].fillna("").astype(str).str.strip()
     df["summary"] = df["summary"].fillna("").astype(str).str.strip()
     df["link"] = df["link"].fillna("").astype(str).str.strip()
-
-    # tags puede venir como texto, lista serializada o vacío
     df["tags"] = df["tags"].fillna("").astype(str).str.strip()
 
-    # Convertir fecha
-    df["published"] = pd.to_datetime(df["published"], errors="coerce")
+    df["published"] = pd.to_datetime(df["published"], errors="coerce",
+                                     utc=True, format="mixed")
 
-    # Eliminar filas sin título y sin resumen
+    before = len(df)
     df = df[~((df["title"] == "") & (df["summary"] == ""))]
+    print(f"Filas sin title ni summary eliminadas: {before - len(df)}")
 
-    # Quedarse solo con columnas necesarias
-    df = df[expected_columns]
+    before = len(df)
+    df = df.drop_duplicates(subset=["news_paper", "section", "title", "published", "link"])
+    print(f"Duplicados eliminados: {before - len(df)}")
 
-    return df
+    return df[EXPECTED_COLUMNS].reset_index(drop=True)
 
 
-def read_all_csv_files() -> pd.DataFrame:
-    """
-    Recorre Argentina/periódico/sección/*.csv y une todo
-    en un solo DataFrame.
-    """
-
-    all_dataframes = []
-
-    csv_files = list(BASE_DIR.rglob("*.csv"))
-
-    print(f"CSV encontrados: {len(csv_files)}")
-
-    for csv_path in csv_files:
-        try:
-            relative_path = csv_path.relative_to(BASE_DIR)
-            parts = relative_path.parts
-
-            # Esperado:
-            # parts[0] = periódico
-            # parts[1] = sección
-            if len(parts) < 3:
-                print(f"Saltando archivo con estructura inesperada: {csv_path}")
-                continue
-
-            news_paper = parts[0]
-            section = parts[1]
-
-            print(f"Leyendo: {csv_path}")
-            print(f"  Periódico: {news_paper}")
-            print(f"  Sección: {section}")
-
-            # Intenta leer con UTF-8
-            try:
-                df = pd.read_csv(csv_path)
-            except UnicodeDecodeError:
-                df = pd.read_csv(csv_path, encoding="latin1")
-
-            df = clean_dataframe(df, news_paper, section)
-            all_dataframes.append(df)
-
-        except Exception as e:
-            print(f"Error leyendo {csv_path}: {e}")
-
-    if not all_dataframes:
-        raise ValueError("No se pudo leer ningún CSV.")
-
-    final_df = pd.concat(all_dataframes, ignore_index=True)
-
-    return final_df
+def print_stats(df: pd.DataFrame):
+    print("\n Estadisticas del dataset limpio")
+    print(f"Registros finales : {len(df)}")
+    print(f"Periodicos        : {df['news_paper'].nunique()}")
+    print(f"Secciones         : {df['section'].nunique()}")
+    print("\nNulos por columna:")
+    print(df.isnull().sum().to_string())
+    print("\nFechas invalidas (published NaT):", int(df["published"].isna().sum()))
+    print("\nDistribucion por section (top 15):")
+    print(df["section"].value_counts().head(15).to_string())
+    print("\nDistribucion por news_paper:")
+    print(df["news_paper"].value_counts().to_string())
 
 
 def upload_to_mongo(df: pd.DataFrame):
-    """
-    Inserta el DataFrame limpio en MongoDB.
-    """
+    client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=8000)
+    collection = client[DB_NAME][COLLECTION_NAME]
 
-    client = MongoClient(MONGO_URI)
-    db = client[DB_NAME]
-    collection = db[COLLECTION_NAME]
-
-    # Limpia colección anterior para evitar duplicados
     collection.delete_many({})
 
-    # Convertir fechas NaT a None para MongoDB
-    df = df.where(pd.notnull(df), None)
-
+    df = df.astype(object).where(pd.notnull(df), None)
     records = df.to_dict("records")
 
-    if records:
-        collection.insert_many(records)
+    BATCH = 5000
+    inserted = 0
+    for i in range(0, len(records), BATCH):
+        chunk = records[i:i + BATCH]
+        collection.insert_many(chunk, ordered=False)
+        inserted += len(chunk)
+        print(f"  insertados {inserted}/{len(records)}")
 
-    print(f"Registros insertados en MongoDB: {collection.count_documents({})}")
-
-    print("\nDistribución por section:")
-    for row in collection.aggregate([
-        {"$group": {"_id": "$section", "cantidad": {"$sum": 1}}},
-        {"$sort": {"cantidad": -1}}
-    ]):
-        print(row)
-
-    print("\nDistribución por news_paper:")
-    for row in collection.aggregate([
-        {"$group": {"_id": "$news_paper", "cantidad": {"$sum": 1}}},
-        {"$sort": {"cantidad": -1}}
-    ]):
-        print(row)
+    print(f"\nDocumentos en la coleccion: {collection.count_documents({})}")
+    client.close()
 
 
 if __name__ == "__main__":
-    df = read_all_csv_files()
-
-    print("\nDataset final:")
-    print(df.head())
-
-    print("\nDimensiones:")
-    print(df.shape)
-
-    print("\nNulos por columna:")
-    print(df.isnull().sum())
-
-    print("\nDistribución de section:")
-    print(df["section"].value_counts())
-
+    df_raw = read_all_records()
+    df = clean_dataframe(df_raw)
+    print_stats(df)
     upload_to_mongo(df)
+    print("\nCarga finalizada. Siguiente paso: python create_indexes_mongo.py")
